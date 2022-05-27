@@ -1,0 +1,856 @@
+{
+	"name": "IncrementalLoad",
+	"properties": {
+		"activities": [
+			{
+				"name": "Config_Table",
+				"type": "Lookup",
+				"dependsOn": [
+					{
+						"activity": "DateTime",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"policy": {
+					"timeout": "7.00:00:00",
+					"retry": 0,
+					"retryIntervalInSeconds": 30,
+					"secureOutput": false,
+					"secureInput": false
+				},
+				"userProperties": [],
+				"typeProperties": {
+					"source": {
+						"type": "AzureSqlSource",
+						"sqlReaderQuery": {
+							"value": "select \nid\n,load_type\n,ApplicationName\n,SourceType\n,json_value(sourcedetail,'$.databasename') as databasename\n,json_value(sourcedetail,'$.schema') as [SrcSchemaname]\n,json_value(sourcedetail,'$.tablename') as SrcTablename\n,json_value(TargetDetail,'$.databasename') as Databasename\n,json_value(TargetDetail,'$.schema') as [TargetSchemaname]\n,json_value(TargetDetail,'$.tablename') as TargetTablename\n,json_value(TargetDetail,'$.schema') as [StgSchemaname]\n,json_value(TargetDetail,'$.tablename') as StgTablename\n,PrimaryKey\n,PKFlag\n,Success_Failure\n,folderpath\n,DataFactory_Name\n,Pipeline_Name\n,RunId\n,CreateStm\n,MergeStm\n,TableCreated\n,LMD\n,LMD_ColumnName\nfrom Config_Table",
+							"type": "Expression"
+						},
+						"queryTimeout": "02:00:00",
+						"partitionOption": "None"
+					},
+					"dataset": {
+						"referenceName": "SQLMetaTable",
+						"type": "DatasetReference"
+					},
+					"firstRowOnly": false
+				}
+			},
+			{
+				"name": "ForEach1",
+				"type": "ForEach",
+				"dependsOn": [
+					{
+						"activity": "Config_Table",
+						"dependencyConditions": [
+							"Succeeded"
+						]
+					}
+				],
+				"userProperties": [],
+				"typeProperties": {
+					"items": {
+						"value": "@activity('Config_Table').output.value",
+						"type": "Expression"
+					},
+					"batchCount": 50,
+					"activities": [
+						{
+							"name": "Data Extraction",
+							"type": "Copy",
+							"dependsOn": [],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "AzureSqlSource",
+									"sqlReaderQuery": {
+										"value": "@concat('select * from  ', item().schemaname,'.', item().tablename,'-- where Last_Modified_Date = Item().StartTime')",
+										"type": "Expression"
+									},
+									"queryTimeout": "02:00:00",
+									"partitionOption": "None"
+								},
+								"sink": {
+									"type": "ParquetSink",
+									"storeSettings": {
+										"type": "AzureBlobFSWriteSettings"
+									},
+									"formatSettings": {
+										"type": "ParquetWriteSettings"
+									}
+								},
+								"enableStaging": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "SQLMetaTable",
+									"type": "DatasetReference"
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "DumpSrcData",
+									"type": "DatasetReference",
+									"parameters": {
+										"FolderPath": {
+											"value": "@concat(item().ApplicationName,'/',item().Load_Type,'/',item().SourceType,'/',item().schemaname,'/',item().tablename, '/' ,replace(variables('DateTime'), ':', '/'))",
+											"type": "Expression"
+										},
+										"FileName": "@item().tablename"
+									}
+								}
+							]
+						},
+						{
+							"name": "Data Loading",
+							"type": "Copy",
+							"dependsOn": [
+								{
+									"activity": "Data Extraction",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"source": {
+									"type": "ParquetSource",
+									"storeSettings": {
+										"type": "AzureBlobFSReadSettings",
+										"recursive": true,
+										"enablePartitionDiscovery": false
+									}
+								},
+								"sink": {
+									"type": "AzureSqlSink",
+									"writeBehavior": "insert",
+									"sqlWriterUseTableLock": false
+								},
+								"enableStaging": false,
+								"translator": {
+									"type": "TabularTranslator",
+									"typeConversion": true,
+									"typeConversionSettings": {
+										"allowDataTruncation": true,
+										"treatBooleanAsNumber": false
+									}
+								}
+							},
+							"inputs": [
+								{
+									"referenceName": "DumpSrcData",
+									"type": "DatasetReference",
+									"parameters": {
+										"FolderPath": "@concat(item().ApplicationName,'/',item().Load_Type,'/',item().SourceType,'/',item().schemaname,'/',item().tablename, '/' ,replace(variables('DateTime'), ':', '/'))",
+										"FileName": "@item().tablename"
+									}
+								}
+							],
+							"outputs": [
+								{
+									"referenceName": "AzureSqlTable1",
+									"type": "DatasetReference",
+									"parameters": {
+										"SchemaName": "@item().StagingSchema",
+										"TableName": "@item().tablename"
+									}
+								}
+							]
+						},
+						{
+							"name": "Execute Merge",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Data Loading",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": {
+									"value": "@item().MergeStm",
+									"type": "Expression"
+								}
+							},
+							"linkedServiceName": {
+								"referenceName": "SQL",
+								"type": "LinkedServiceReference"
+							}
+						},
+						{
+							"name": "Success",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Execute Merge",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								},
+								{
+									"activity": "Data Loading",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								},
+								{
+									"activity": "Data Extraction",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								},
+								{
+									"activity": "EndTime",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": "USP_Update_Status",
+								"storedProcedureParameters": {
+									"sorf": {
+										"value": "S",
+										"type": "String"
+									},
+									"tablename": {
+										"value": {
+											"value": "@item().SrcTablename",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"load_type": {
+										"value": {
+											"value": "@item().Load_Type",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"SourceType": {
+										"value": {
+											"value": "@item().SourceType",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"StartTime": {
+										"value": {
+											"value": "@variables('DateTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"EndTime": {
+										"value": {
+											"value": "@variables('EndTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"folderpath": {
+										"value": {
+											"value": "@concat(item().ApplicationName,'/',item().Load_Type,'/',item().SourceType,'/',item().schemaname,'/',item().tablename, '/' ,replace(variables('DateTime'), ':', '/'))",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"DataFactory_Name": {
+										"value": {
+											"value": "@pipeline().DataFactory",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Pipeline_Name": {
+										"value": {
+											"value": "@pipeline().Pipeline",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"RunId": {
+										"value": {
+											"value": "@pipeline().RunId",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Size_Of_Data": {
+										"value": {
+											"value": "@{activity('Data Extraction').output.dataWritten}",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"rowcount_src_to_adls": {
+										"value": {
+											"value": "@{activity('Data Extraction').output.rowsCopied}",
+											"type": "Expression"
+										},
+										"type": "Int32"
+									},
+									"rowcount_adls_to_dwh": {
+										"value": {
+											"value": "@{activity('Data Loading').output.rowsCopied}",
+											"type": "Expression"
+										},
+										"type": "Int32"
+									},
+									"TimeTaken_src_to_adls": {
+										"value": {
+											"value": "@{activity('Data Extraction').output.copyDuration}",
+											"type": "Expression"
+										},
+										"type": "Int32"
+									},
+									"TimeTaken_adls_to_dwh": {
+										"value": {
+											"value": "@{activity('Data Loading').output.copyDuration}",
+											"type": "Expression"
+										},
+										"type": "Int32"
+									},
+									"TimeTaken_MergeStm": {
+										"value": {
+											"value": "@{activity('Execute Merge').output.billingReference.billableDuration}",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"error_msg_src_to_adls": {
+										"value": "Success",
+										"type": "String"
+									},
+									"error_msg_adls_to_dwh": {
+										"value": "Success",
+										"type": "String"
+									},
+									"error_msg_MergeStm": {
+										"value": "Success",
+										"type": "String"
+									},
+									"TableCreated": {
+										"value": null,
+										"type": "String"
+									}
+								}
+							},
+							"linkedServiceName": {
+								"referenceName": "SQL",
+								"type": "LinkedServiceReference"
+							}
+						},
+						{
+							"name": "Failure Data Extraction",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Data Extraction",
+									"dependencyConditions": [
+										"Failed"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": "USP_Update_Status",
+								"storedProcedureParameters": {
+									"sorf": {
+										"value": "F",
+										"type": "String"
+									},
+									"tablename": {
+										"value": {
+											"value": "@item().SrcTablename",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"load_type": {
+										"value": {
+											"value": "@item().Load_Type",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"SourceType": {
+										"value": {
+											"value": "@item().SourceType",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"StartTime": {
+										"value": {
+											"value": "@variables('DateTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"EndTime": {
+										"value": {
+											"value": "@variables('EndTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"folderpath": {
+										"value": null,
+										"type": "String"
+									},
+									"DataFactory_Name": {
+										"value": {
+											"value": "@pipeline().DataFactory",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Pipeline_Name": {
+										"value": {
+											"value": "@pipeline().Pipeline",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"RunId": {
+										"value": {
+											"value": "@pipeline().RunId",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Size_Of_Data": {
+										"value": null,
+										"type": "String"
+									},
+									"rowcount_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"rowcount_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_MergeStm": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_src_to_adls": {
+										"value": {
+											"value": "@{activity('Data Extraction').output.errors[0].Message}",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"error_msg_adls_to_dwh": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_MergeStm": {
+										"value": null,
+										"type": "String"
+									},
+									"TableCreated": {
+										"value": null,
+										"type": "String"
+									}
+								}
+							},
+							"linkedServiceName": {
+								"referenceName": "SQL",
+								"type": "LinkedServiceReference"
+							}
+						},
+						{
+							"name": "EndTime",
+							"type": "SetVariable",
+							"dependsOn": [
+								{
+									"activity": "Data Extraction",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								},
+								{
+									"activity": "Data Loading",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								},
+								{
+									"activity": "Execute Merge",
+									"dependencyConditions": [
+										"Succeeded"
+									]
+								}
+							],
+							"userProperties": [],
+							"typeProperties": {
+								"variableName": "EndTime",
+								"value": {
+									"value": "@formatDateTime(utcnow(),'yyyy/MM/dd HH:mm:ss')",
+									"type": "Expression"
+								}
+							}
+						},
+						{
+							"name": "Failure Data Loading",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Data Loading",
+									"dependencyConditions": [
+										"Failed"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": "USP_Update_Status",
+								"storedProcedureParameters": {
+									"sorf": {
+										"value": "F",
+										"type": "String"
+									},
+									"tablename": {
+										"value": {
+											"value": "@item().SrcTablename",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"load_type": {
+										"value": {
+											"value": "@item().Load_Type",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"SourceType": {
+										"value": {
+											"value": "@item().SourceType",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"StartTime": {
+										"value": {
+											"value": "@variables('DateTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"EndTime": {
+										"value": {
+											"value": "@variables('EndTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"folderpath": {
+										"value": null,
+										"type": "String"
+									},
+									"DataFactory_Name": {
+										"value": {
+											"value": "@pipeline().DataFactory",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Pipeline_Name": {
+										"value": {
+											"value": "@pipeline().Pipeline",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"RunId": {
+										"value": {
+											"value": "@pipeline().RunId",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Size_Of_Data": {
+										"value": null,
+										"type": "String"
+									},
+									"rowcount_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"rowcount_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_MergeStm": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_src_to_adls": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_adls_to_dwh": {
+										"value": {
+											"value": "@{activity('Data Loading').output.errors[0].Message}",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"error_msg_MergeStm": {
+										"value": null,
+										"type": "String"
+									},
+									"TableCreated": {
+										"value": null,
+										"type": "String"
+									}
+								}
+							},
+							"linkedServiceName": {
+								"referenceName": "SQL",
+								"type": "LinkedServiceReference"
+							}
+						},
+						{
+							"name": "Failure Execute Merge",
+							"type": "SqlServerStoredProcedure",
+							"dependsOn": [
+								{
+									"activity": "Execute Merge",
+									"dependencyConditions": [
+										"Failed"
+									]
+								}
+							],
+							"policy": {
+								"timeout": "7.00:00:00",
+								"retry": 0,
+								"retryIntervalInSeconds": 30,
+								"secureOutput": false,
+								"secureInput": false
+							},
+							"userProperties": [],
+							"typeProperties": {
+								"storedProcedureName": "USP_Update_Status",
+								"storedProcedureParameters": {
+									"sorf": {
+										"value": "F",
+										"type": "String"
+									},
+									"tablename": {
+										"value": {
+											"value": "@item().SrcTablename",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"load_type": {
+										"value": {
+											"value": "@item().Load_Type",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"SourceType": {
+										"value": {
+											"value": "@item().SourceType",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"StartTime": {
+										"value": {
+											"value": "@variables('DateTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"EndTime": {
+										"value": {
+											"value": "@variables('EndTime')",
+											"type": "Expression"
+										},
+										"type": "Datetime"
+									},
+									"folderpath": {
+										"value": null,
+										"type": "String"
+									},
+									"DataFactory_Name": {
+										"value": {
+											"value": "@pipeline().DataFactory",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Pipeline_Name": {
+										"value": {
+											"value": "@pipeline().Pipeline",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"RunId": {
+										"value": {
+											"value": "@pipeline().RunId",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"Size_Of_Data": {
+										"value": null,
+										"type": "String"
+									},
+									"rowcount_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"rowcount_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_src_to_adls": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_adls_to_dwh": {
+										"value": null,
+										"type": "Int32"
+									},
+									"TimeTaken_MergeStm": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_src_to_adls": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_adls_to_dwh": {
+										"value": null,
+										"type": "String"
+									},
+									"error_msg_MergeStm": {
+										"value": {
+											"value": "@{activity('Execute Merge').output.errors[0].Message}",
+											"type": "Expression"
+										},
+										"type": "String"
+									},
+									"TableCreated": {
+										"value": null,
+										"type": "String"
+									}
+								}
+							},
+							"linkedServiceName": {
+								"referenceName": "SQL",
+								"type": "LinkedServiceReference"
+							}
+						}
+					]
+				}
+			},
+			{
+				"name": "DateTime",
+				"type": "SetVariable",
+				"dependsOn": [],
+				"userProperties": [],
+				"typeProperties": {
+					"variableName": "DateTime",
+					"value": {
+						"value": "@formatDateTime(utcnow(),'yyyy/MM/dd HH:mm:ss')",
+						"type": "Expression"
+					}
+				}
+			}
+		],
+		"variables": {
+			"DateTime": {
+				"type": "String"
+			},
+			"EndTime": {
+				"type": "String"
+			}
+		},
+		"annotations": [],
+		"lastPublishTime": "2022-05-27T05:10:04Z"
+	},
+	"type": "Microsoft.DataFactory/factories/pipelines"
+}
